@@ -45,7 +45,8 @@
 const unsigned long DOT_DURATION_MAX = 200;  // 0 - 0.2s is a dot
 const unsigned long DASH_DURATION_MAX = 600; // 0.2 - 0.6s is a dash
 const unsigned long CHAR_TIMEOUT = 700;      // 0.7s blank means end of char
-const unsigned long DEBOUNCE = 10;           // 10ms debounce
+const unsigned long BLANK_TIMEOUT = 10000;   // 10s blank means clear screen
+const unsigned long DEBOUNCE = 30;           // 30ms debounce
 
 /* =======================
    Objects
@@ -61,6 +62,7 @@ enum StateEnum
   STATE_INPUT_WAIT,
   STATE_INPUT_PRESS
 };
+
 enum ChannelEnum
 {
   CHANNEL_NONE,
@@ -71,9 +73,7 @@ enum ChannelEnum
 StateEnum currentState = StateEnum::STATE_SELECT_CHANNEL;
 
 String inputSequence = ""; // Stores ".-" sequence
-unsigned long pressStartTime = 0;
-unsigned long releaseStartTime = 0;
-bool buttonWasPressed = false;
+String textSequence = "";  // Stores recorded text sequence
 
 // Morse Code Lookup Table (Simple version)
 const struct
@@ -120,6 +120,10 @@ void handleChannelChange(ChannelEnum channel);
 void handleMorseInput();
 void processCharacter();
 char decodeMorse(String sequence);
+void displayText(String textSeq);
+void clearText();
+void displayInput(String inputSeq);
+void clearInput();
 void feedback(bool state);
 void displayError();
 
@@ -237,6 +241,7 @@ void handleChannelChange(ChannelEnum channel)
     lcd.print(channel);
     delay(500);
     lcd.clear();
+    displayText("");
     currentState = StateEnum::STATE_INPUT_WAIT;
     break;
   case ChannelEnum::CHANNEL_NONE:
@@ -249,6 +254,9 @@ void handleChannelChange(ChannelEnum channel)
   }
 }
 
+unsigned long pressStartTime = 0;
+unsigned long releaseStartTime = 0;
+bool buttonWasPressed = false;
 void handleMorseInput()
 {
   bool isPressed = (digitalRead(PIN_BUTTON_SEND) == LOW); // LOW because INPUT_PULLUP
@@ -282,18 +290,23 @@ void handleMorseInput()
     }
 
     // Update screen "Display the dot and dash on screen"
-    lcd.setCursor(0, 1);
-    lcd.print(inputSequence);
+    displayInput(inputSequence);
   }
 
   // 3. Waiting (Gap Check)
-  else if (
-      !isPressed && inputSequence.length() > 0)
+  else if (!isPressed)
   {
     // "A blank of CHAR_TIMEOUT or above?"
-    if (millis() - releaseStartTime >= CHAR_TIMEOUT)
-
+    unsigned long duration = millis() - releaseStartTime;
+    if (duration >= CHAR_TIMEOUT && inputSequence.length() > 0)
+    {
       processCharacter();
+    }
+    else if (duration >= BLANK_TIMEOUT && textSequence.length() > 0)
+    {
+      clearText();
+      clearInput();
+    }
   }
 }
 
@@ -302,38 +315,56 @@ void processCharacter()
   // "The corresponding alphabet exist?"
   char letter = decodeMorse(inputSequence);
 
-  lcd.clear();
-  lcd.setCursor(0, 0);
-
   if (letter != '?')
   {
     // YES: "Transform... Send information"
-    lcd.print("Sent: ");
-    lcd.print(letter);
-    Serial.print("SENT_CHAR:");
-    Serial.println(letter); // Send to "other display"
+    textSequence += letter;
+    displayText(textSequence);
+
+    Serial.print("SENT:");
+    Serial.println(textSequence);
 
     // TODO: SEND TO LORA
   }
   else
-  {
-    // NO: "Display Error for 3 seconds"
     displayError();
-  }
 
   // Reset for next input
-  inputSequence = "";
-  lcd.clear();
-  lcd.print("Input: ");
+  clearInput();
   releaseStartTime = millis(); // Reset timer
+}
+
+void displayText(String textSeq)
+{
+  lcd.setCursor(0, 0);
+  lcd.print("TX:");
+  lcd.print(textSeq);
+}
+
+void clearText()
+{
+  textSequence = "";
+  displayText("             ");
+  Serial.println("Cleared text");
+}
+
+void displayInput(String inputSeq)
+{
+  lcd.setCursor(0, 1);
+  lcd.print(inputSeq);
+}
+
+void clearInput()
+{
+  inputSequence = "";
+  displayInput("                ");
 }
 
 void displayError()
 {
-  lcd.clear();
-  lcd.setCursor(0, 0);
-  lcd.print("Error");
-  // delay(3000);
+  displayInput("<Error>");
+  delay(300);
+  clearInput();
 }
 
 char decodeMorse(String sequence)
