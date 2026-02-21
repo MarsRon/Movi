@@ -11,6 +11,8 @@
 #include <Arduino.h>
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
+#include <ESP8266WiFi.h>
+#include <espnow.h>
 
 /* =======================
    Pin Definitions
@@ -40,6 +42,10 @@
 #define LCD_ADDRESS 0x27
 #define LCD_COLUMNS 16
 #define LCD_ROWS 2
+
+// REPLACE WITH RECEIVER MAC Address
+// universal mac address
+uint8_t broadcastAddress[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
 // Timing thresholds from flowchart
 const unsigned long DOT_DURATION_MAX = 200;  // 0 - 0.2s is a dot
@@ -110,6 +116,22 @@ const struct
     // Add numbers if needed
 };
 
+// Structure example to send data
+// Must match the receiver structure
+typedef struct struct_message
+{
+  char morse_sequence[8];
+  char text_sequence[32];
+  int test;
+} struct_message;
+
+// Create a struct_message called txData
+struct_message txData;
+struct_message rxData;
+
+unsigned long lastChannelCheck = 0;
+ChannelEnum currentChannel = ChannelEnum::CHANNEL_NONE;
+
 /* =======================
    Function Prototypes
    ======================= */
@@ -126,6 +148,10 @@ void displayInput(String inputSeq);
 void clearInput();
 void feedback(bool state);
 void displayError();
+// Callback when data is sent
+void OnDataSent(uint8_t *mac_addr, uint8_t sendStatus);
+// Callback function that will be executed when data is received
+void OnDataRecv(uint8_t *mac, uint8_t *incomingData, uint8_t len);
 
 /* =======================
    Setup
@@ -149,26 +175,36 @@ void setup()
    ======================= */
 void loop()
 {
-  ChannelEnum channel = getChannelSelection();
-  bool channelChanged = detectButtonChange(channel);
-  if (channelChanged)
-    handleChannelChange(channel);
+  // 1. Throttle the ADC read to once every 200ms to allow Wi-Fi to use the ADC
+  if (millis() - lastChannelCheck > 200)
+  {
+    currentChannel = getChannelSelection();
+    bool channelChanged = detectButtonChange(currentChannel);
 
-  // Skip if still selecting channel
+    if (channelChanged)
+    {
+      handleChannelChange(currentChannel);
+    }
+
+    lastChannelCheck = millis();
+  }
+
+  // 2. Skip if still selecting channel
   if (currentState == StateEnum::STATE_SELECT_CHANNEL)
   {
-    delay(100);
+    delay(50); // Small delay to yield to background tasks
     return;
   }
 
-  // sanity check
-  if (channel == ChannelEnum::CHANNEL_NONE)
+  // 3. Sanity check
+  if (currentChannel == ChannelEnum::CHANNEL_NONE)
   {
     Serial.println("CHANNEL UNSELECTED WTF");
+    delay(10);
     return;
   }
 
-  // Handle input
+  // 4. Handle input
   handleMorseInput();
 }
 
@@ -190,7 +226,27 @@ void initHardware()
   pinMode(PIN_BUZZER_LED, OUTPUT);
   digitalWrite(PIN_BUZZER_LED, LOW);
 
-  // TODO: LORA INIT
+  // ESP NOW INIT
+  // Set device as a Wi-Fi Station
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect(); // IMPORTANT: Disconnects from saved networks so the channel doesn't drift
+  delay(100);
+
+  // Init ESP-NOW
+  if (esp_now_init() != 0)
+  {
+    Serial.println("Error initializing ESP-NOW");
+    return;
+  }
+
+  // Once ESPNow is successfully Init, we will register for Send CB to
+  // get the status of Trasnmitted packet
+  esp_now_set_self_role(ESP_NOW_ROLE_COMBO);
+  esp_now_register_send_cb(OnDataSent);
+  esp_now_register_recv_cb(OnDataRecv);
+
+  // Register peer
+  esp_now_add_peer(broadcastAddress, ESP_NOW_ROLE_COMBO, 1, NULL, 0);
 }
 
 ChannelEnum getChannelSelection()
@@ -321,10 +377,21 @@ void processCharacter()
     textSequence += letter;
     displayText(textSequence);
 
-    Serial.print("SENT:");
+    Serial.print("SENT MORSE:");
+    Serial.print(inputSequence);
+    Serial.print("\t");
+    Serial.print("SENT TEXT:");
     Serial.println(textSequence);
 
-    // TODO: SEND TO LORA
+    // Set values to send
+    // Safely convert the String to a char array for transmission
+    strncpy(txData.morse_sequence, inputSequence.c_str(), sizeof(txData.morse_sequence) - 1);
+    txData.morse_sequence[sizeof(txData.morse_sequence) - 1] = '\0'; // Force null termination for safety
+    strncpy(txData.text_sequence, textSequence.c_str(), sizeof(txData.text_sequence) - 1);
+    txData.text_sequence[sizeof(txData.text_sequence) - 1] = '\0'; // Force null termination for safety
+
+    // Send message via ESP-NOW
+    esp_now_send(broadcastAddress, (uint8_t *)&txData, sizeof(txData));
   }
   else
     displayError();
@@ -391,5 +458,43 @@ void feedback(bool state)
   {
     // digitalWrite(PIN_BUZZER_LED, LOW); // LED OFF
     noTone(PIN_BUZZER_LED); // Buzzer OFF
+  }
+}
+
+// Callback when data is sent
+void OnDataSent(uint8_t *mac_addr, uint8_t sendStatus)
+{
+  Serial.print("Last Packet Send Status: ");
+  if (sendStatus == 0)
+  {
+    Serial.println("Delivery success");
+  }
+  else
+  {
+    Serial.println("Delivery fail");
+  }
+}
+
+// Callback function that will be executed when data is received
+void OnDataRecv(uint8_t *mac, uint8_t *incomingData, uint8_t len)
+{
+  // Safety check: Only accept data if it perfectly matches our struct size
+  if (len == sizeof(rxData))
+  {
+    memcpy(&rxData, incomingData, sizeof(rxData));
+
+    Serial.print("Bytes received: ");
+    Serial.println(len);
+
+    Serial.print("Morse sequence: ");
+    Serial.println(rxData.morse_sequence);
+
+    Serial.print("Text sequence: ");
+    Serial.println(rxData.text_sequence);
+    Serial.println("-----------------");
+  }
+  else
+  {
+    Serial.println("RX Error: Payload size mismatch!");
   }
 }
