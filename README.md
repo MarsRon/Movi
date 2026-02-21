@@ -11,10 +11,14 @@ Final Semester Project (FSP) of students of Tutorial Class E2T2 Kolej Matrikulas
 - Go Yu An (CTO)
 - Luqman Haqeem bin \_\_\_\_ (CFO)
 
+# todo
+
+securely pass the received morse_msg data up to the LCD screen without crashing the Wi-Fi background task
+
 # Mac address
 
 - Unit 1: `68:C6:3A:B2:F9:20`
-{0x68, 0xC6, 0x3A, 0xB2, 0xF9, 0x20}
+  {0x68, 0xC6, 0x3A, 0xB2, 0xF9, 0x20}
 
 - Unit 2: `84:F3:EB:D5:7A:92`
-{0x84, 0xF3, 0xEB, 0xD5, 0x7A, 0x92}
+  {0x84, 0xF3, 0xEB, 0xD5, 0x7A, 0x92}
