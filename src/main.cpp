@@ -1,3 +1,11 @@
+// TODO:
+// - Add channel selection
+// - Change buzzer pin
+// - Change LED pin
+// - Rewire Board 2
+// - Drill holes in our casing
+// - Solder Buzzer 1
+
 /****************************************************
  * LoraDataViz - Morse Code Input System
  * Hardware:
@@ -9,7 +17,6 @@
  ****************************************************/
 
 #include <Arduino.h>
-#include <Wire.h>
 #include <LiquidCrystal_I2C.h>
 #include <ESP8266WiFi.h>
 #include <espnow.h>
@@ -20,21 +27,19 @@
 
 /*
   PIN USAGE:
-  A0 (ADC0) CHANNEL SELECT (ANALOG INPUT)
-  D1 (5) LCD SCL
-  D2 (4) LCD SDA
-  D3 (0) SEND BUTTON (INPUT PULL_UP)
-  D4 (2) BUZZER + LED (OUTPUT PWM)
-  D5 (14) LORA SCLK
-  D6 (12) LORA MISO
-  D7 (13) LORA MOSI
-  D8 (15) LORA CS
+  A0 (ADC0)   CHANNEL SELECT (ANALOG INPUT)
+  D1 (GPIO5)  LCD SCL
+  D2 (GPIO4)  LCD SDA
+  D3 (GPIO0)  SEND BUTTON (INPUT PULL_UP)
+  D4 (GPIO2)  LED
+  D5 (GPIO14) BUZZER (OUTPUT PWM)
 */
 
 // Adjust these depending on your specific board mapping
 #define PIN_CHANNEL_SELECT A0 // Analog Input
-#define PIN_BUTTON_SEND 0     // D3 (GPIO 0 on NodeMCU)
-#define PIN_BUZZER_LED 2      // D4 (GPIO 2 on NodeMCU)
+#define PIN_BUTTON_SEND 0     // D3 (GPIO 0)
+#define PIN_LED 2             // D4 (GPIO 2)
+#define PIN_BUZZER 14         // D5 (GPIO 14)
 
 /* =======================
    Constants & Settings
@@ -47,12 +52,14 @@
 // universal mac address
 uint8_t broadcastAddress[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
-// Timing thresholds from flowchart
+// Timing thresholds
 const unsigned long DOT_DURATION_MAX = 200;  // 0 - 0.2s is a dot
 const unsigned long DASH_DURATION_MAX = 600; // 0.2 - 0.6s is a dash
 const unsigned long CHAR_TIMEOUT = 700;      // 0.7s blank means end of char
 const unsigned long BLANK_TIMEOUT = 5000;    // 5s blank means clear screen
 const unsigned long DEBOUNCE = 30;           // 30ms debounce
+const unsigned long ADC_POLL_TIME = 200;     // Throttle ADC to allow Wi-Fi to use the ADC
+const unsigned long FEEDBACK_POLL_TIME = 5;  // Feedback tick every 5ms
 
 /* =======================
    Objects
@@ -119,10 +126,13 @@ typedef struct struct_message
 struct_message txData;
 struct_message rxData;
 
-volatile bool newMsgReceived = false; // Flag to tell the main loop we have a message
-bool isRx = false;
+volatile bool newMsgReceived = false;
+volatile bool isRx = false;
+volatile bool giveFeedback = false;
 
-unsigned long lastChannelCheck = 0;
+unsigned long lastFeedbackCheckTime = 0;
+
+unsigned long lastChannelCheckTime = 0;
 ChannelEnum currentChannel = ChannelEnum::CHANNEL_NONE;
 
 /* =======================
@@ -130,7 +140,7 @@ ChannelEnum currentChannel = ChannelEnum::CHANNEL_NONE;
    ======================= */
 void initHardware();
 ChannelEnum getChannelSelection();
-bool detectButtonChange(ChannelEnum channel);
+bool detectChannelChange(ChannelEnum channel);
 void handleChannelChange(ChannelEnum channel);
 void handleMorseInput();
 void processCharacter();
@@ -139,7 +149,7 @@ void displayText(String textSeq, bool isTx = true);
 void clearText(bool isTx = true);
 void displayInput(String inputSeq);
 void clearInput();
-void feedback(bool state);
+void handleFeedback();
 void displayError();
 void OnDataSent(uint8_t *mac, uint8_t sendStatus);
 void OnDataRecv(uint8_t *mac, uint8_t *incomingData, uint8_t len);
@@ -168,18 +178,21 @@ void setup()
    ======================= */
 void loop()
 {
-  // 1. Throttle the ADC read to once every 200ms to allow Wi-Fi to use the ADC
-  if (millis() - lastChannelCheck > 200)
+  unsigned long currentMillis = millis();
+  // 1. Throttle the ADC to allow Wi-Fi to use the ADC
+  if (currentMillis - lastChannelCheckTime > ADC_POLL_TIME)
   {
+    lastChannelCheckTime = currentMillis;
+
     currentChannel = getChannelSelection();
-    bool channelChanged = detectButtonChange(currentChannel);
 
-    if (channelChanged)
-    {
+    if (detectChannelChange(currentChannel))
       handleChannelChange(currentChannel);
-    }
-
-    lastChannelCheck = millis();
+  }
+  else if (currentMillis - lastFeedbackCheckTime > FEEDBACK_POLL_TIME)
+  {
+    lastFeedbackCheckTime = currentMillis;
+    handleFeedback();
   }
 
   // 2. Skip if still selecting channel
@@ -215,10 +228,9 @@ void loop()
     displayInput(rxData.input_sequence);
     displayText(rxData.text_sequence, false);
 
-    // Optional: Give a quick beep to notify the user of a new message
-    // feedback(true);
-    // delay(100);
-    // feedback(false);
+    giveFeedback = true;
+    handleFeedback();
+    giveFeedback = false;
   }
 
   // 4. Handle input
@@ -241,8 +253,8 @@ void initHardware()
   pinMode(PIN_BUTTON_SEND, INPUT_PULLUP);
 
   // Buzzer & LED
-  pinMode(PIN_BUZZER_LED, OUTPUT);
-  digitalWrite(PIN_BUZZER_LED, LOW);
+  pinMode(PIN_BUZZER, OUTPUT);
+  digitalWrite(PIN_BUZZER, LOW);
 
   // ESP-NOW
   // Set device as a Wi-Fi Station
@@ -287,7 +299,7 @@ ChannelEnum getChannelSelection()
 }
 
 ChannelEnum previousChannel = ChannelEnum::CHANNEL_NONE;
-bool detectButtonChange(ChannelEnum channel)
+bool detectChannelChange(ChannelEnum channel)
 {
   if (channel != previousChannel)
   {
@@ -324,7 +336,7 @@ void handleChannelChange(ChannelEnum channel)
 
 unsigned long pressStartTime = 0;
 unsigned long releaseStartTime = 0;
-bool buttonWasPressed = false;
+volatile bool buttonWasPressed = false;
 void handleMorseInput()
 {
   bool isPressed = (digitalRead(PIN_BUTTON_SEND) == LOW); // LOW because INPUT_PULLUP
@@ -333,7 +345,7 @@ void handleMorseInput()
   if (isPressed && !buttonWasPressed)
   {
     pressStartTime = millis();
-    feedback(true); // LED/Buzzer ON
+    giveFeedback = true; // LED/Buzzer ON
     buttonWasPressed = true;
 
     if (isRx)
@@ -350,7 +362,7 @@ void handleMorseInput()
     if (inputSequence.length() <= 16)
     {
       unsigned long duration = millis() - pressStartTime;
-      feedback(false); // LED/Buzzer OFF
+      giveFeedback = false; // LED/Buzzer OFF
       buttonWasPressed = false;
       releaseStartTime = millis();
 
@@ -477,18 +489,21 @@ char decodeMorse(String sequence)
   return '?'; // Not found
 }
 
-void feedback(bool state)
+void handleFeedback()
 {
   // "Set the buzzer and led light simultaneously"
-  if (state)
+  if (giveFeedback)
   {
-    // digitalWrite(PIN_BUZZER_LED, HIGH); // LED ON
-    tone(PIN_BUZZER_LED, 1000); // Buzzer Tone (if supported on pin)
+    digitalWrite(PIN_LED, HIGH); // LED ON
+    if (isRx)
+      tone(PIN_BUZZER, 1500); // Buzzer Tone
+    else
+      tone(PIN_BUZZER, 1000); // Buzzer Tone
   }
   else
   {
-    // digitalWrite(PIN_BUZZER_LED, LOW); // LED OFF
-    noTone(PIN_BUZZER_LED); // Buzzer OFF
+    digitalWrite(PIN_LED, LOW); // LED OFF
+    noTone(PIN_BUZZER);         // Buzzer OFF
   }
 }
 
