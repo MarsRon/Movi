@@ -1,8 +1,5 @@
 // TODO:
 // - Add channel selection
-// - Change buzzer pin
-// - Change LED pin
-// - Rewire Board 2
 // - Drill holes in our casing
 // - Solder Buzzer 1
 
@@ -69,11 +66,29 @@ LiquidCrystal_I2C lcd(LCD_ADDRESS, LCD_COLUMNS, LCD_ROWS);
 /* =======================
    Variables & States
    ======================= */
+enum StateEnum
+{
+  SELECTING_CHANNEL,
+  IDLE,
+  RX,
+  TX
+};
+StateEnum state = StateEnum::SELECTING_CHANNEL;
+
 enum ChannelEnum
 {
   CHANNEL_NONE,
   CHANNEL_1,
   CHANNEL_2
+};
+ChannelEnum currentChannel = ChannelEnum::CHANNEL_NONE;
+
+enum FeedbackType
+{
+  TX_FB = 1000,
+  RX_FB = 1500,
+  CHARACTER = 3000,
+  ERROR = 2000
 };
 
 String inputSequence = ""; // Stores ".-" sequence
@@ -118,6 +133,11 @@ const struct
 // Must match the receiver structure
 typedef struct struct_message
 {
+  ChannelEnum channel = ChannelEnum::CHANNEL_NONE;
+  bool clear_input = false;
+  bool clear_text = false;
+  bool sent_input = false;
+  bool sent_text = false;
   char input_sequence[8];
   char text_sequence[32];
 } struct_message;
@@ -127,13 +147,12 @@ struct_message txData;
 struct_message rxData;
 
 volatile bool newMsgReceived = false;
-volatile bool isRx = false;
-volatile bool giveFeedback = false;
+volatile bool isGivingFeedback = false;
+volatile bool usingTimeoutFeedback = false;
 
 unsigned long lastFeedbackCheckTime = 0;
-
 unsigned long lastChannelCheckTime = 0;
-ChannelEnum currentChannel = ChannelEnum::CHANNEL_NONE;
+unsigned long stopFeedbackTime = 0;
 
 /* =======================
    Function Prototypes
@@ -149,7 +168,8 @@ void displayText(String textSeq, bool isTx = true);
 void clearText(bool isTx = true);
 void displayInput(String inputSeq);
 void clearInput();
-void handleFeedback();
+void setFeedback(bool active, FeedbackType feedbackToneType = FeedbackType::TX_FB);
+void timeoutFeedback(unsigned long duration, FeedbackType feedbackToneType = FeedbackType::TX_FB);
 void displayError();
 void OnDataSent(uint8_t *mac, uint8_t sendStatus);
 void OnDataRecv(uint8_t *mac, uint8_t *incomingData, uint8_t len);
@@ -179,24 +199,30 @@ void setup()
 void loop()
 {
   unsigned long currentMillis = millis();
+
   // 1. Throttle the ADC to allow Wi-Fi to use the ADC
   if (currentMillis - lastChannelCheckTime > ADC_POLL_TIME)
   {
     lastChannelCheckTime = currentMillis;
-
     currentChannel = getChannelSelection();
-
     if (detectChannelChange(currentChannel))
       handleChannelChange(currentChannel);
   }
-  else if (currentMillis - lastFeedbackCheckTime > FEEDBACK_POLL_TIME)
+
+  // shut off feedback
+  if (currentMillis - lastFeedbackCheckTime > FEEDBACK_POLL_TIME)
   {
+    if (usingTimeoutFeedback && currentMillis >= stopFeedbackTime)
+    {
+      Serial.println("Timeout feedback OFF");
+      usingTimeoutFeedback = false;
+      setFeedback(false);
+    }
     lastFeedbackCheckTime = currentMillis;
-    handleFeedback();
   }
 
   // 2. Skip if still selecting channel
-  if (currentChannel == ChannelEnum::CHANNEL_NONE)
+  if (state == StateEnum::SELECTING_CHANNEL)
   {
     delay(50);
     return;
@@ -206,31 +232,44 @@ void loop()
   if (newMsgReceived)
   {
     newMsgReceived = false; // Lower the flag immediately
-    isRx = true;
+    state = StateEnum::RX;
 
     Serial.print("Morse Sequence: ");
     Serial.print(rxData.input_sequence);
     Serial.print("\t");
     Serial.print("Letter: ");
     Serial.println(rxData.text_sequence);
-    // Serial.println("-----------------");
 
     // Update the LCD
-    if (strlen(rxData.text_sequence) == 0) // just started new transmission
+    if (rxData.clear_text) // just started new transmission
     {
       clearInput();
       clearText(false);
     }
-    if (strlen(rxData.input_sequence) == 1)
+    if (rxData.clear_input)
     {
       clearInput();
     }
     displayInput(rxData.input_sequence);
     displayText(rxData.text_sequence, false);
 
-    giveFeedback = true;
-    handleFeedback();
-    giveFeedback = false;
+    if (rxData.sent_input)
+    {
+      // get last character of rxData.input_sequence
+      char lastChar = rxData.input_sequence[strlen(rxData.input_sequence) - 1];
+      if (lastChar == '.')
+      {
+        timeoutFeedback(100, FeedbackType::RX_FB);
+      }
+      else if (lastChar == '-')
+      {
+        timeoutFeedback(300, FeedbackType::RX_FB);
+      }
+    }
+    else if (rxData.sent_text)
+    {
+      timeoutFeedback(100, FeedbackType::CHARACTER);
+    }
   }
 
   // 4. Handle input
@@ -254,25 +293,31 @@ void initHardware()
 
   // Buzzer & LED
   pinMode(PIN_BUZZER, OUTPUT);
+  pinMode(PIN_LED, OUTPUT);
   digitalWrite(PIN_BUZZER, LOW);
+  digitalWrite(PIN_LED, LOW);
 
   // ESP-NOW
   // Set device as a Wi-Fi Station
   WiFi.mode(WIFI_STA);
   WiFi.disconnect(); // IMPORTANT: Disconnects from saved networks so the channel doesn't drift
   delay(100);
+
   if (esp_now_init() != 0)
   {
     Serial.println("Error initializing ESP-NOW");
     return;
   }
+
   // Once ESPNow is successfully Init, we will register for Send CB to
   // get the status of Trasnmitted packet
   esp_now_set_self_role(ESP_NOW_ROLE_COMBO);
   esp_now_register_send_cb(OnDataSent);
   esp_now_register_recv_cb(OnDataRecv);
+
   // Register peer
-  esp_now_add_peer(broadcastAddress, ESP_NOW_ROLE_COMBO, 1, NULL, 0);
+  // TODO: channel
+  esp_now_add_peer(broadcastAddress, ESP_NOW_ROLE_COMBO, CHANNEL_1, NULL, 0);
 }
 
 ChannelEnum getChannelSelection()
@@ -315,21 +360,32 @@ void handleChannelChange(ChannelEnum channel)
   {
   case ChannelEnum::CHANNEL_1:
   case ChannelEnum::CHANNEL_2:
-    Serial.print("Selected Channel: ");
-    Serial.println(channel);
+    state = StateEnum::IDLE;
+
     lcd.clear();
     lcd.setCursor(6, 1);
     lcd.print("CH");
     lcd.print(channel);
+
+    // Serial.print("Selected Channel: ");
+    // Serial.println(channel);
+
     delay(500);
+
     lcd.clear();
     displayText("");
+
     break;
+
   case ChannelEnum::CHANNEL_NONE:
-    Serial.println("Selected Channel: None");
+    state = StateEnum::SELECTING_CHANNEL;
+
     lcd.clear();
     lcd.setCursor(0, 1);
     lcd.print("<SELECT CHANNEL>");
+
+    // Serial.println("Selected Channel: None");
+
     break;
   }
 }
@@ -339,32 +395,44 @@ unsigned long releaseStartTime = 0;
 volatile bool buttonWasPressed = false;
 void handleMorseInput()
 {
+  unsigned long now = millis();
   bool isPressed = (digitalRead(PIN_BUTTON_SEND) == LOW); // LOW because INPUT_PULLUP
 
   // 1. Button JUST Pressed
   if (isPressed && !buttonWasPressed)
   {
-    pressStartTime = millis();
-    giveFeedback = true; // LED/Buzzer ON
+    pressStartTime = now;
     buttonWasPressed = true;
+    Serial.println("Button pressed feedback ON");
+    setFeedback(true);
 
-    if (isRx)
+    if (state == StateEnum::RX)
     {
       clearInput();
       clearText();
     }
-    isRx = false;
+    state = StateEnum::TX;
   }
 
   // 2. Button JUST Released
   else if (!isPressed && buttonWasPressed)
   {
-    if (inputSequence.length() <= 16)
+    if (inputSequence.length() < 16)
     {
-      unsigned long duration = millis() - pressStartTime;
-      giveFeedback = false; // LED/Buzzer OFF
+      unsigned long duration = now - pressStartTime;
+      Serial.println("Button released feedback OFF");
+      setFeedback(false);
       buttonWasPressed = false;
-      releaseStartTime = millis();
+      releaseStartTime = now;
+
+      if (inputSequence.length() == 0)
+      {
+        txData.clear_input = true;
+      }
+      else
+      {
+        txData.clear_input = false;
+      }
 
       // Logic: 0 - 0.3s is Dot, >0.3s is Dash
       if (duration > DEBOUNCE && duration <= DOT_DURATION_MAX)
@@ -383,8 +451,10 @@ void handleMorseInput()
       // Safely convert the String to a char array for transmission
       strncpy(txData.input_sequence, inputSequence.c_str(), sizeof(txData.input_sequence) - 1);
       txData.input_sequence[sizeof(txData.input_sequence) - 1] = '\0'; // Force null termination for safety
+      txData.sent_input = true;
       // Send message via ESP-NOW
       esp_now_send(broadcastAddress, (uint8_t *)&txData, sizeof(txData));
+      txData.sent_input = false;
     }
   }
 
@@ -392,13 +462,14 @@ void handleMorseInput()
   else if (!isPressed)
   {
     // "A blank of CHAR_TIMEOUT or above?"
-    unsigned long duration = millis() - releaseStartTime;
+    unsigned long duration = now - releaseStartTime;
     if (duration >= CHAR_TIMEOUT && inputSequence.length() > 0)
     {
       processCharacter();
     }
-    else if (duration >= BLANK_TIMEOUT && textSequence.length() > 0 && !isRx)
+    else if (duration >= BLANK_TIMEOUT && textSequence.length() > 0 && state != StateEnum::RX)
     {
+      state = StateEnum::IDLE;
       clearText();
       clearInput();
       strncpy(txData.input_sequence, "", sizeof(txData.input_sequence) - 1);
@@ -415,6 +486,15 @@ void processCharacter()
   if (letter != '?')
   {
     // YES: "Transform... Send information"
+    if (textSequence.length() == 0)
+    {
+      txData.clear_text = true;
+    }
+    else
+    {
+      txData.clear_text = false;
+    }
+
     textSequence += letter;
     displayText(textSequence);
 
@@ -427,13 +507,17 @@ void processCharacter()
     Serial.print("SENT:");
     Serial.println(textSequence);
 
+    timeoutFeedback(100, FeedbackType::CHARACTER);
+
     // Set values to send
     // Safely convert the String to a char array for transmission
     strncpy(txData.text_sequence, textSequence.c_str(), sizeof(txData.text_sequence) - 1);
     txData.text_sequence[sizeof(txData.text_sequence) - 1] = '\0'; // Force null termination for safety
 
     // Send message via ESP-NOW
+    txData.sent_text = true;
     esp_now_send(broadcastAddress, (uint8_t *)&txData, sizeof(txData));
+    txData.sent_text = false;
   }
   else
     displayError();
@@ -489,22 +573,31 @@ char decodeMorse(String sequence)
   return '?'; // Not found
 }
 
-void handleFeedback()
+void setFeedback(bool active, FeedbackType feedbackToneType)
 {
   // "Set the buzzer and led light simultaneously"
-  if (giveFeedback)
+  if (active)
   {
-    digitalWrite(PIN_LED, HIGH); // LED ON
-    if (isRx)
-      tone(PIN_BUZZER, 1500); // Buzzer Tone
-    else
-      tone(PIN_BUZZER, 1000); // Buzzer Tone
+    // Serial.println("Feedback ON");
+    isGivingFeedback = true;
+    digitalWrite(PIN_LED, HIGH);        // LED ON
+    tone(PIN_BUZZER, feedbackToneType); // Buzzer Tone
   }
   else
   {
+    // Serial.println("Feedback OFF");
+    isGivingFeedback = false;
     digitalWrite(PIN_LED, LOW); // LED OFF
     noTone(PIN_BUZZER);         // Buzzer OFF
   }
+}
+
+void timeoutFeedback(unsigned long duration, FeedbackType feedbackToneType)
+{
+  usingTimeoutFeedback = true;
+  stopFeedbackTime = millis() + duration;
+  Serial.println("Timeout Feedback ON");
+  setFeedback(true, feedbackToneType);
 }
 
 // Callback when data is sent
