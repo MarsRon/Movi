@@ -10,7 +10,8 @@
  * - 16x2 LCD (LiquidCrystal_I2C)
  * - 3-way channel select (Analog Voltage Divider on A0)
  * - Send button (D3)
- * - Buzzer & LED (D4)
+ * - LED (D4) GPIO2
+ * - Buzzer (D5) PGIO14
  ****************************************************/
 
 #include <Arduino.h>
@@ -232,43 +233,52 @@ void loop()
   if (newMsgReceived)
   {
     newMsgReceived = false; // Lower the flag immediately
-    state = StateEnum::RX;
 
-    Serial.print("Morse Sequence: ");
-    Serial.print(rxData.input_sequence);
-    Serial.print("\t");
-    Serial.print("Letter: ");
-    Serial.println(rxData.text_sequence);
+    if (rxData.channel == currentChannel)
+    {
+      state = StateEnum::RX;
 
-    // Update the LCD
-    if (rxData.clear_text) // just started new transmission
-    {
-      clearInput();
-      clearText(false);
-    }
-    if (rxData.clear_input)
-    {
-      clearInput();
-    }
-    displayInput(rxData.input_sequence);
-    displayText(rxData.text_sequence, false);
+      Serial.print("Morse Sequence: ");
+      Serial.print(rxData.input_sequence);
+      Serial.print("\t");
+      Serial.print("Letter: ");
+      Serial.println(rxData.text_sequence);
 
-    if (rxData.sent_input)
-    {
-      // get last character of rxData.input_sequence
-      char lastChar = rxData.input_sequence[strlen(rxData.input_sequence) - 1];
-      if (lastChar == '.')
+      // Update the LCD
+      if (rxData.clear_text) // just started new transmission
       {
-        timeoutFeedback(100, FeedbackType::RX_FB);
+        clearInput();
+        clearText(false);
       }
-      else if (lastChar == '-')
+      if (rxData.clear_input)
       {
-        timeoutFeedback(300, FeedbackType::RX_FB);
+        clearInput();
+      }
+      displayInput(rxData.input_sequence);
+      displayText(rxData.text_sequence, false);
+
+      if (rxData.sent_input)
+      {
+        // get last character of rxData.input_sequence
+        char lastChar = rxData.input_sequence[strlen(rxData.input_sequence) - 1];
+        if (lastChar == '.')
+        {
+          timeoutFeedback(100, FeedbackType::RX_FB);
+        }
+        else if (lastChar == '-')
+        {
+          timeoutFeedback(300, FeedbackType::RX_FB);
+        }
+      }
+      else if (rxData.sent_text)
+      {
+        timeoutFeedback(100, FeedbackType::CHARACTER);
       }
     }
-    else if (rxData.sent_text)
+    else
     {
-      timeoutFeedback(100, FeedbackType::CHARACTER);
+      Serial.print("Message from other channel. Channel: ");
+      Serial.println(rxData.channel);
     }
   }
 
@@ -356,6 +366,7 @@ bool detectChannelChange(ChannelEnum channel)
 
 void handleChannelChange(ChannelEnum channel)
 {
+  txData.channel = channel;
   switch (channel)
   {
   case ChannelEnum::CHANNEL_1:
@@ -401,17 +412,20 @@ void handleMorseInput()
   // 1. Button JUST Pressed
   if (isPressed && !buttonWasPressed)
   {
-    pressStartTime = now;
-    buttonWasPressed = true;
-    Serial.println("Button pressed feedback ON");
-    setFeedback(true);
-
-    if (state == StateEnum::RX)
+    if (inputSequence.length() < 16)
     {
-      clearInput();
-      clearText();
+      pressStartTime = now;
+      buttonWasPressed = true;
+      Serial.println("Button pressed feedback ON");
+      setFeedback(true);
+
+      if (state == StateEnum::RX)
+      {
+        clearInput();
+        clearText();
+      }
+      state = StateEnum::TX;
     }
-    state = StateEnum::TX;
   }
 
   // 2. Button JUST Released
