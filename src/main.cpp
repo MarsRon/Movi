@@ -1,8 +1,3 @@
-// TODO:
-// - Add channel selection
-// - Drill holes in our casing
-// - Solder Buzzer 1
-
 /****************************************************
  * LoraDataViz - Morse Code Input System
  * Hardware:
