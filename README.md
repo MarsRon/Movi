@@ -9,7 +9,7 @@ Final Semester Project (FSP) of students of Tutorial Class E2T2 2025/2026, Kolej
 - Jonah Yeh Xian Rong (CEO)
 - Liew Yu Hong (COO)
 - Go Yu An (CTO)
-- Luqman Haqeem bin \_\_\_\_ (CFO)
+- Muhammad Luqman Haqeem bin Sulaiman (CFO)
 
 # Mac address
 
