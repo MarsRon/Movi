@@ -179,7 +179,7 @@ void setup()
   initHardware();
 
   Serial.println("<SYSTEM READY>");
-  lcd.setCursor(7, 0);
+  lcd.setCursor(6, 0);
   lcd.print("MOVI");
   lcd.setCursor(1, 1);
   lcd.print("<SYSTEM READY>");
@@ -387,7 +387,7 @@ void handleChannelChange(ChannelEnum channel)
     state = StateEnum::SELECTING_CHANNEL;
 
     lcd.clear();
-    lcd.setCursor(7, 0);
+    lcd.setCursor(6, 0);
     lcd.print("MOVI");
     lcd.setCursor(0, 1);
     lcd.print("<SELECT CHANNEL>");
