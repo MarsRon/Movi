@@ -1,5 +1,5 @@
 /****************************************************
- * LoraDataViz - Morse Code Input System
+ * Movi - Morse code/serial data transceiver and education tool.
  * Hardware:
  * - ESP-12E NodeMCU (ESP8266)
  * - 16x2 LCD (LiquidCrystal_I2C)
@@ -179,8 +179,8 @@ void setup()
   initHardware();
 
   Serial.println("<SYSTEM READY>");
-  lcd.setCursor(2, 0);
-  lcd.print("LoraDataViz");
+  lcd.setCursor(7, 0);
+  lcd.print("MOVI");
   lcd.setCursor(1, 1);
   lcd.print("<SYSTEM READY>");
   delay(1000);
@@ -387,6 +387,8 @@ void handleChannelChange(ChannelEnum channel)
     state = StateEnum::SELECTING_CHANNEL;
 
     lcd.clear();
+    lcd.setCursor(7, 0);
+    lcd.print("MOVI");
     lcd.setCursor(0, 1);
     lcd.print("<SELECT CHANNEL>");
 
